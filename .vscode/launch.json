@@ -1,0 +1,50 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "args": [
+
+            ]
+        },
+        {
+            "name": "Launch generate pose in WSL",
+            "type": "python",
+            "request": "launch",
+            // "program": "${workspaceFolder}/sample/generate.py",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            // 环境变量 Path 加上当前路径，以方便python引入包
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "args": [
+                "--model_path",
+                "checkpoints/diffusion/c1_pose/model000340000.pt",
+                "--resume_trans",
+                "checkpoints/guide/c1_pose/checkpoints/iter-0100000.pt",
+                "--num_samples",
+                "1",
+                "--num_repetitions",
+                "1",
+                "--timestep_respacing",
+                "ddim100",
+                "--guidance_param",
+                "10.0"
+
+            ]
+        }
+    ]
+}

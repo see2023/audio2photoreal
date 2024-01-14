@@ -33,9 +33,9 @@ class ParameterTransform(nn.Module):
         super().__init__()
 
         # self.pose_names = list(lbs_cfg_dict["joint_names"])
-        self.channel_names = list(lbs_cfg_dict["channel_names"])
-        transform_offsets = torch.FloatTensor(lbs_cfg_dict["transform_offsets"])
-        transform = torch.FloatTensor(lbs_cfg_dict["transform"])
+        self.channel_names = list(lbs_cfg_dict["channel_names"]) # tx ty tz rx ry rz sc
+        transform_offsets = torch.FloatTensor(lbs_cfg_dict["transform_offsets"]) # 1 x 1113
+        transform = torch.FloatTensor(lbs_cfg_dict["transform"]) # 1113 x 157
         self.limits = lbs_cfg_dict["limits"]
 
         self.nr_scaling_params = lbs_cfg_dict["nr_scaling_params"]
@@ -313,6 +313,49 @@ class LinearBlendSkinning(nn.Module):
         else:
             mesh = self.skinning(self.bind_state, verts_unposed, states)
         return mesh
+    
+    def forward_with_state(self, poses: th.Tensor, scales: th.Tensor, verts_unposed: Optional[th.Tensor] = None) -> th.Tensor:
+        """
+        Args:
+            poses: [B, NP] - pose parametersa
+            scales: [B, NS] - additional scaling params
+            verts_unposed: [B, N, 3] - unposed vertices
+                
+        Returns:
+            [B, N, 3] - posed vertices
+        """
+        params = torch.cat((poses, scales), 1)
+        params_transformed = self.param_transform(params)
+        states = solve_skeleton_state(
+            params_transformed,
+            self.joint_offset,
+            self.joint_rotation,
+            self.joint_parents,
+        )
+        if verts_unposed is None:
+            mesh = self.skinning(self.bind_state, self.mesh_vertices.unsqueeze(0), states)
+        else:
+            mesh = self.skinning(self.bind_state, verts_unposed, states)
+        return mesh, states
+    
+    def get_state(self, poses: th.Tensor, scales: th.Tensor) -> th.Tensor:
+        """
+        Args:
+            poses: [B, NP] - pose parametersa [2, 104]
+            scales: [B, NS] - additional scaling params
+                
+        Returns:
+            [2, 159, 8]
+        """
+        params = torch.cat((poses, scales), 1)
+        params_transformed = self.param_transform(params)
+        states = solve_skeleton_state(
+            params_transformed,
+            self.joint_offset,
+            self.joint_rotation,
+            self.joint_parents,
+        )
+        return states
 
 
 def solve_skeleton_state(param: th.Tensor, joint_offset: th.Tensor, joint_rotation: th.Tensor, joint_parents: th.Tensor):
@@ -750,16 +793,16 @@ def compute_pose_regions_legacy(lbs_fn) -> np.ndarray:
     return param_masks > 0.0
 
 
-def compute_pose_mask_uv(lbs_fn, geo_fn, uv_size, ksize=25):
-    device = geo_fn.index_image.device
-    pose_regions = compute_pose_regions(lbs_fn)
-    pose_regions = (
-        th.as_tensor(pose_regions[6:], dtype=th.float32).permute(1, 0)[np.newaxis].to(device)
-    )
-    pose_regions_uv = geo_fn.to_uv(pose_regions)
-    pose_regions_uv = F.max_pool2d(pose_regions_uv, ksize, 1, padding=ksize // 2)
-    pose_cond_mask = (F.interpolate(pose_regions_uv, size=(uv_size, uv_size)) > 0.1).to(th.int32)
-    return pose_cond_mask
+# def compute_pose_mask_uv(lbs_fn, geo_fn, uv_size, ksize=25):
+#     device = geo_fn.index_image.device
+#     pose_regions = compute_pose_regions(lbs_fn)
+#     pose_regions = (
+#         th.as_tensor(pose_regions[6:], dtype=th.float32).permute(1, 0)[np.newaxis].to(device)
+#     )
+#     pose_regions_uv = geo_fn.to_uv(pose_regions)
+#     pose_regions_uv = F.max_pool2d(pose_regions_uv, ksize, 1, padding=ksize // 2)
+#     pose_cond_mask = (F.interpolate(pose_regions_uv, size=(uv_size, uv_size)) > 0.1).to(th.int32)
+#     return pose_cond_mask
 
 
 def parent_chain(joint_parents, idx, depth):
@@ -824,5 +867,13 @@ class LBSModule(nn.Module):
         scale = self.lbs_scale.expand(B, -1)
         verts = self.lbs_template_verts[np.newaxis].expand(B, -1, -1)
         return self.lbs_fn(motion, scale, verts) * self.global_scaling[np.newaxis]
+    
+    def get_state(self, motion):
+        B = motion.shape[0]
+        scale = self.lbs_scale.expand(B, -1)
+        return self.lbs_fn.get_state(motion, scale)
+
+    def forward_with_state(self, motion,  scales, verts_unposed):
+        return self.lbs_fn.forward_with_state(motion, scales, verts_unposed)
 
 

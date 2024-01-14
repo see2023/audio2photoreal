@@ -68,6 +68,7 @@ def _replace_keyframes(
     assert (
         model_kwargs["y"]["keyframes"].shape == pred.shape
     ), f"{model_kwargs['y']['keyframes'].shape} vs {pred.shape}"
+    # body [1, 20 ,104]
     return pred
 
 
@@ -97,12 +98,12 @@ def _run_single_diffusion(
         )
     sample = inv_transform(sample.cpu().permute(0, 2, 3, 1), args.data_format).permute(
         0, 3, 1, 2
-    )
-    curr_audio = inv_transform(model_kwargs["y"]["audio"].cpu().numpy(), "audio")
-    keyframes = inv_transform(model_kwargs["y"]["keyframes"], args.data_format)
+    ) # sample: [1, 104, 1, 600]
+    curr_audio = inv_transform(model_kwargs["y"]["audio"].cpu().numpy(), "audio") # audio: [1, 960000, 2]
+    keyframes = inv_transform(model_kwargs["y"]["keyframes"], args.data_format) # keyframes: [1, 20, 104]
     gt_seq = inv_transform(gt.cpu().permute(0, 2, 3, 1), args.data_format).permute(
         0, 3, 1, 2
-    )
+    ) # gt: [1, 104, 1, 600]
 
     return sample, curr_audio, keyframes, gt_seq
 

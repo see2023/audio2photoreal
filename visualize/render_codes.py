@@ -47,6 +47,61 @@ def call_ffmpeg(command: str) -> None:
     if e != 0:
         assert False, e
 
+# change bodymotion to body_pose using lbs_fn
+# [T, 104] --> [T, 159, 7]
+class BodyTransformer(torch.nn.Module):
+    def __init__(self, config_base: str):
+        super().__init__()
+        self.config_base = config_base
+        ckpt_path = f"{config_base}/body_dec.ckpt"
+        config_path = f"{config_base}/config.yml"
+        assets_path = f"{config_base}/static_assets.pt"
+        # config
+        config = OmegaConf.load(config_path)
+        gpu = config.get("gpu", 0)
+        self.device = th.device(f"cuda:{gpu}")
+        # assets
+        static_assets = AttrDict(torch.load(assets_path))
+        # build model
+        self.model = load_from_config(config.model, assets=static_assets).to(
+            self.device
+        )
+        self.model.cal_enabled = False
+        self.model.pixel_cal_enabled = False
+        self.model.learn_blur_enabled = False
+        self.model.rendering_enabled = None
+        # load model checkpoints
+        print("loading...", ckpt_path)
+        load_checkpoint(
+            ckpt_path,
+            modules={"model": self.model},
+            ignore_names={"model": ["lbs_fn.*"]},
+        )
+        self.model.eval()
+        self.model.to(self.device)
+        # load default parameters for renderer
+        person = get_person_num(config_path)
+        self.default_inputs = th.load(f"assets/render_defaults_{person}.pth")
+    
+    def motion_transform(self, body_pose: np.ndarray) -> np.ndarray:
+        all_states = []
+        default_inputs_copy = copy.deepcopy(self.default_inputs)
+        for b in tqdm(range(len(body_pose))):
+            B = default_inputs_copy["K"].shape[0]
+            default_inputs_copy["lbs_motion"] = (
+                th.tensor(body_pose[b : b + 1, :], device=self.device, dtype=th.float)
+                .tile(B, 1)
+                .to(self.device)
+            )
+            state = (
+                self.model.lbs_fn.get_state(
+                    default_inputs_copy["lbs_motion"],
+                )
+            )
+            all_states.append(state.contiguous().detach().cpu().numpy())
+        return np.concatenate(all_states, axis=0)
+
+
 
 class BodyRenderer(th.nn.Module):
     def __init__(
@@ -91,11 +146,16 @@ class BodyRenderer(th.nn.Module):
     def _write_video_stream(
         self, motion: np.ndarray, face: np.ndarray, save_name: str
     ) -> None:
-        out = self._render_loop(motion, face)
+        out, all_states = self._render_loop(motion, face)
+        all_states = np.concatenate(all_states, axis=0)
+        print(all_states.shape)
+        print('saving body_motions_0.npy')
+        np.save(f"body_motions_0.npy", all_states)
         mediapy.write_video(save_name, out, fps=30)
 
     def _render_loop(self, body_pose: np.ndarray, face: np.ndarray) -> List[np.ndarray]:
         all_rgb = []
+        all_states = []
         default_inputs_copy = copy.deepcopy(self.default_inputs)
         for b in tqdm(range(len(body_pose))):
             B = default_inputs_copy["K"].shape[0]
@@ -104,14 +164,14 @@ class BodyRenderer(th.nn.Module):
                 .tile(B, 1)
                 .to(self.device)
             )
-            geom = (
-                self.model.lbs_fn.lbs_fn(
+            geom, state = self.model.lbs_fn.forward_with_state(
                     default_inputs_copy["lbs_motion"],
                     self.model.lbs_fn.lbs_scale.unsqueeze(0).tile(B, 1),
                     self.model.lbs_fn.lbs_template_verts.unsqueeze(0).tile(B, 1, 1),
                 )
-                * self.model.lbs_fn.global_scaling
-            )
+                
+            geom = geom * self.model.lbs_fn.global_scaling
+            all_states.append(state.contiguous().detach().cpu().numpy())
             default_inputs_copy["geom"] = geom
             face_codes = (
                 th.from_numpy(face).float().cuda() if not th.is_tensor(face) else face
@@ -124,7 +184,7 @@ class BodyRenderer(th.nn.Module):
             rgb = th.cat((rgb0, rgb1), axis=-1).permute(1, 2, 0)
             rgb = rgb.clip(0, 255).to(th.uint8)
             all_rgb.append(rgb.contiguous().detach().byte().cpu().numpy())
-        return all_rgb
+        return all_rgb, all_states
 
     def render_full_video(
         self,

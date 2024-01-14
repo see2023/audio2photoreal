@@ -1,0 +1,8 @@
+dataset/
+**/__pycache__/
+assets/
+*.mp4
+checkpoints/
+test.py
+*.wav
+*.npy

@@ -6,7 +6,6 @@ LICENSE file in the root directory of this source tree.
 """
 
 
-import copy
 import json
 from typing import Dict, Union
 
@@ -20,15 +19,12 @@ from model.cfg_sampler import ClassifierFreeSampleModel
 from model.diffusion import FiLMTransformer
 from utils.misc import fixseed
 from utils.model_util import create_model_and_diffusion, load_model
-from visualize.render_codes import BodyRenderer
+from visualize.render_codes import BodyTransformer
 
 
-class GradioModel:
-    def __init__(self, face_args, pose_args) -> None:
-        self.face_model, self.face_diffusion, self.device = self._setup_model(
-            face_args, "checkpoints/diffusion/c1_face/model000155000.pt"
-        )
-        self.pose_model, self.pose_diffusion, _ = self._setup_model(
+class PoseModel:
+    def __init__(self, pose_args) -> None:
+        self.pose_model, self.pose_diffusion, self.device = self._setup_model(
             pose_args, "checkpoints/diffusion/c1_pose/model000340000.pt"
         )
         # load standardization stuff
@@ -36,11 +32,9 @@ class GradioModel:
         stats["pose_mean"] = stats["pose_mean"].reshape(-1)
         stats["pose_std"] = stats["pose_std"].reshape(-1)
         self.stats = stats
-        # set up renderer
         config_base = f"./checkpoints/ca_body/data/PXB184"
-        self.body_renderer = BodyRenderer(
+        self.body_transformer = BodyTransformer(
             config_base=config_base,
-            render_rgb=True,
         )
 
     def _setup_model(
@@ -154,6 +148,9 @@ class GradioModel:
         print(f"created {len(all_motions) * num_repetitions} samples")
         return np.concatenate(all_motions, axis=0)
 
+pose_model = PoseModel(
+    pose_args="./checkpoints/diffusion/c1_pose/args.json",
+)
 
 def generate_results(audio: np.ndarray, num_repetitions: int, top_p: float):
     if audio is None:
@@ -180,24 +177,14 @@ def generate_results(audio: np.ndarray, num_repetitions: int, top_p: float):
     model_kwargs = {"y": {}}
     dual_audio = np.random.normal(0, 0.001, (1, len(y), 2))
     dual_audio[:, :, 0] = y / max(y)
-    dual_audio = (dual_audio - gradio_model.stats["audio_mean"]) / gradio_model.stats[
+    dual_audio = (dual_audio - pose_model.stats["audio_mean"]) / pose_model.stats[
         "audio_std_flat"
     ]
     model_kwargs["y"]["audio"] = (
         torch.Tensor(dual_audio).float().tile(num_repetitions, 1, 1)
     )
-    face_results = (
-        gradio_model.generate_sequences(
-            model_kwargs, "face", curr_seq_length, num_repetitions=int(num_repetitions)
-        )
-        .squeeze(2)
-        .transpose(0, 2, 1)
-    )
-    face_results = (
-        face_results * gradio_model.stats["code_std"] + gradio_model.stats["code_mean"]
-    )
     pose_results = (
-        gradio_model.generate_sequences(
+        pose_model.generate_sequences(
             model_kwargs,
             "pose",
             curr_seq_length,
@@ -209,51 +196,40 @@ def generate_results(audio: np.ndarray, num_repetitions: int, top_p: float):
         .transpose(0, 2, 1)
     )
     pose_results = (
-        pose_results * gradio_model.stats["pose_std"] + gradio_model.stats["pose_mean"]
+        pose_results * pose_model.stats["pose_std"] + pose_model.stats["pose_mean"]
     )
     dual_audio = (
-        dual_audio * gradio_model.stats["audio_std_flat"]
-        + gradio_model.stats["audio_mean"]
+        dual_audio * pose_model.stats["audio_std_flat"]
+        + pose_model.stats["audio_mean"]
     )
-    return face_results, pose_results, dual_audio[0].transpose(1, 0).astype(np.float32)
+    return pose_results, dual_audio[0].transpose(1, 0).astype(np.float32)
 
 
-def audio_to_avatar(audio: np.ndarray, audio_from_file: np.ndarray, num_repetitions: int, top_p: float):
-    # audio: array(230400 x int16)
-    if audio is None and audio_from_file is not None:
-        print("using audio from file")
-        audio_buf,sr = torchaudio.load(audio_from_file)
-        audio = (sr, audio_buf.numpy()[0])
-    else:
-        print("using audio from mic")
-    face_results, pose_results, audio = generate_results(audio, num_repetitions, top_p)
-    # returns: num_rep x T x 104
-    B = len(face_results)
+def audio_to_avatar(audio: np.ndarray, num_repetitions: int, top_p: float):
+    pose_results, audio = generate_results(audio, num_repetitions, top_p)
+    # save to audio_i.wav
+    torchaudio.save(f"audio_output.wav", torch.Tensor(audio), 48000) # [2, 192000]
+    print("saved audio_output.wav")
+    B = len(pose_results)
     results = []
     for i in range(B):
-        render_data_block = {
-            "audio": audio,  # 2 x T
-            "body_motion": pose_results[i, ...],  # T x 104
-            "face_motion": face_results[i, ...],  # T x 256
-        }
-        gradio_model.body_renderer.render_full_video(
-            render_data_block, f"/tmp/sample{i}", audio_sr=48_000
+        # "body_motion": pose_results[i, ...],  # B(1) x T x 104
+        # save body_motion_i.npy
+        np.save(f"body_motion_{i}.npy", pose_results[i, ...])
+        print(f"saved body_motion_{i}.npy")
+        body_motions = pose_model.body_transformer.motion_transform(
+            torch.Tensor(pose_results[i, ...])
         )
-        results += [gr.Video(value=f"/tmp/sample{i}_pred.mp4", visible=True)]
-    results += [gr.Video(visible=False) for _ in range(B, 10)]
+        print("body_motions shape:", body_motions.shape) # [2T, 159, 8]
+        # save body_motions_i.npy
+        np.save(f"body_motions_{i}.npy", body_motions)
     return results
 
 
-gradio_model = GradioModel(
-    face_args="./checkpoints/diffusion/c1_face/args.json",
-    pose_args="./checkpoints/diffusion/c1_pose/args.json",
-)
 demo = gr.Interface(
     audio_to_avatar,  # function
     [
         gr.Audio(sources=["microphone"]),
-        # or select from local wav file
-        gr.Audio(type="filepath", label="or select from local wav file", sources=["upload"]),
         gr.Number(
             value=1,
             label="Number of Samples (default = 1)",

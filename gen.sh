@@ -1,0 +1,1 @@
+python -m sample.generate --model_path checkpoints/diffusion/c1_pose/model000340000.pt --resume_trans checkpoints/guide/c1_pose/checkpoints/iter-0100000.pt --num_samples 3 --num_repetitions 1 --timestep_respacing ddim100 --guidance_param 10.0
